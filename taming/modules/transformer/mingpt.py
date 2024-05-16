@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from transformers import top_k_top_p_filtering
+from torch_maskgit import MaskGit
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,27 @@ class GPT(nn.Module):
         self.blocks = nn.Sequential(*[Block(config) for _ in range(config.n_layer)])
         # decoder head
         self.ln_f = nn.LayerNorm(config.n_embd)
-        self.head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.MASKGIT_T_draft = 8
+        self.MASKGIT_T_revise = 8
+        self.MASKGIT_M = 2
+        MASKGIT_VOCAB_DIM = 256
+        MASKGIT_HIDDEN_DIM = 96
+        MASKGIT_SHAPE = None
+        TFM_ARGS = {
+            "embed_dim": 96,
+            "num_heads": 8,
+            "num_layers": 8,
+            "mlp_dim": MASKGIT_HIDDEN_DIM*4, # Can be anything
+            "dropout": 0.0,
+            "attention_dropout": 0.0,
+
+            "vocab_dim": MASKGIT_VOCAB_DIM, # Required, else the code fails
+            # "vocab_size": vocab_size, # DONT USE INTERNAL TF EMBEDDINGS AS TECO DOESNT EITHE
+            "input_dim": n_embd # Input dimensions for pre-encoded tokens
+        }
+
+        self.maskgit = MaskGit(MASKGIT_SHAPE, vocab_size, MASKGIT_VOCAB_DIM, 'cosine', TFM_ARGS)
+        
         self.block_size = config.block_size
         self.apply(self._init_weights)
         self.config = config
@@ -170,12 +191,13 @@ class GPT(nn.Module):
         x = self.drop(token_embeddings + position_embeddings)
         x = self.blocks(x)
         x = self.ln_f(x)
-        logits = self.head(x)
-
         # if we are given some desired targets also calculate the loss
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            logits, labels, mask = self.maskgit(targets, x)
+            return logits, labels, mask
+        else:
+            logits = self.maskgit.sample(x.shape[0], self.MASKGIT_T_draft, self.MASKGIT_T_revise, self.MASKGIT_M, cond=x, sample_shape=None) # NOTE: the sample shape should be replaced
 
         return logits, loss
 
@@ -203,11 +225,9 @@ class GPT(nn.Module):
             presents.append(present)
 
         x = self.ln_f(x)
-        logits = self.head(x)
         # if we are given some desired targets also calculate the loss
         loss = None
-        if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        logits = self.maskgit.sample(x.shape[0], self.MASKGIT_T_draft, self.MASKGIT_T_revise, self.MASKGIT_M, cond=x, sample_shape=None) # NOTE: the sample shape should be replaced
 
         return logits, loss, torch.stack(presents)  # _, _, n_layer, 2, b, nh, 1, dim_head
 

@@ -97,11 +97,12 @@ class Net2NetTransformer(pl.LightningModule):
         # differently because we are conditioning)
         target = z_indices
         # make the prediction
-        logits, _ = self.transformer(cz_indices[:, :-1])
+        logits, _ , mask = self.transformer(cz_indices[:, :-1], target=target)
         # cut off conditioning outputs - output i corresponds to p(z_i | z_{<i}, c)
         logits = logits[:, c_indices.shape[1]-1:]
 
-        return logits, target
+
+        return logits, mask, target
 
     def top_k_logits(self, logits, k):
         v, ix = torch.topk(logits, k)
@@ -291,8 +292,9 @@ class Net2NetTransformer(pl.LightningModule):
 
     def shared_step(self, batch, batch_idx):
         x, c = self.get_xc(batch)
-        logits, target = self(x, c)
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), target.reshape(-1))
+        logits, mask, target = self(x, c)
+        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), target.reshape(-1), reducion='none')
+        loss = (loss * mask).sum() / mask.sum()
         return loss
 
     def training_step(self, batch, batch_idx):
